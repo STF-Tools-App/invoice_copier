@@ -79,7 +79,9 @@ def read_jobs_from_file(path: str | Path) -> list[Job]:
 def parse_text(text: str) -> list[Job]:
     """Mỗi dòng: `Invoice [Tờ khai]` – phân tách bằng tab / dấu phẩy / chấm phẩy / khoảng trắng."""
     jobs, seen = [], set()
-    for line in text.splitlines():
+    for n, line in enumerate(text.splitlines()):
+        if n == 0 and _fold(line).startswith(("invoice", "so invoice", "inv ")):
+            continue                      # bỏ dòng tiêu đề khi copy từ Excel
         parts = [p for p in re.split(r"[\t,;]+|\s+", line.strip()) if p]
         if not parts:
             continue

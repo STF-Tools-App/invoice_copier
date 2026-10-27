@@ -17,15 +17,24 @@ class Job:
         return f"{self.invoice.upper()}|{self.tokhai.upper()}"
 
 
+@dataclass(frozen=True)
+class Candidate:
+    """Một thư mục trong chỉ mục, kèm ổ/thư mục gốc chứa nó."""
+    root: str
+    path: str
+
+
 @dataclass
 class Resolution:
     """Kết quả tìm thư mục + 2 file nguồn cho một Job."""
     job: Job
     kind: str = "ok"            # ok | no_folder | no_files
     folder: Optional[str] = None
+    root: Optional[str] = None
     pdf: Optional[str] = None
     tokhai_file: Optional[str] = None
     message: str = ""
+    tried: int = 0              # số thư mục đã thử
 
 
 @dataclass
@@ -43,3 +52,5 @@ class ScanResult:
     added: int = 0
     removed: int = 0
     cancelled: bool = False
+    skipped: list[str] = field(default_factory=list)          # ổ không truy cập được
+    per_root: dict[str, tuple[int, int, int]] = field(default_factory=dict)  # root -> (tổng, mới, mất)

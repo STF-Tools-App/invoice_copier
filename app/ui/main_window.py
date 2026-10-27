@@ -9,15 +9,18 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from app.constants import (APP_NAME, APP_VERSION, STATUS_ERROR, STATUS_NO_FILES,
-                           STATUS_NO_FOLDER, STATUS_OK, STATUS_PENDING, STATUS_SKIPPED)
+from app.constants import (APP_NAME, APP_VERSION, STATUS_NO_FILES, STATUS_OK,
+                           STATUS_PENDING, STATUS_SKIPPED)
 from app.core import excel_io
-from app.core.config import AppConfig
+from app.core.config import AppConfig, norm_root
 from app.core.index import FolderIndex
+from app.core.logger import log as file_log
 from app.core.models import Job, JobResult
 from app.core.paths import config_dir, index_file
 from app.core.service import process
 from app.ui import theme
+
+SUCCESS_STATUSES = (STATUS_OK, STATUS_SKIPPED)
 
 
 class MainWindow(ttk.Frame):
@@ -33,58 +36,71 @@ class MainWindow(ttk.Frame):
         self.cancel_event = threading.Event()
         self.busy = False
 
-        self.var_src = tk.StringVar(value=self.cfg.source_root)
         self.var_dst = tk.StringVar(value=self.cfg.dest_root)
         self.var_rescan = tk.BooleanVar(value=self.cfg.auto_rescan)
         self.var_overwrite = tk.BooleanVar(value=self.cfg.overwrite)
         self.var_open = tk.BooleanVar(value=self.cfg.open_dest_when_done)
-        self.var_inv = tk.StringVar()
-        self.var_tk = tk.StringVar()
-        self.var_index_info = tk.StringVar()
         self.var_summary = tk.StringVar(value="Sẵn sàng.")
 
         root.title(f"{APP_NAME} v{APP_VERSION}")
-        root.geometry("1000x820")
-        root.minsize(900, 700)
+        root.geometry("1020x860")
+        root.minsize(920, 720)
         theme.apply_theme(root)
         self.pack(fill="both", expand=True)
         self._build()
-        self._refresh_index_info()
+        self._refresh_roots()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll)
 
     # ================================================================ UI
     def _build(self) -> None:
         head = ttk.Frame(self)
-        head.pack(fill="x", pady=(0, 10))
+        head.pack(fill="x", pady=(0, 8))
         ttk.Label(head, text="📁 Invoice Copier", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(head, text="Copy Invoice (.pdf) + Tờ khai (ToKhaiHQ7N_…) từ ổ chung sang ổ riêng, "
+        ttk.Label(head, text="Copy Invoice (.pdf) + Tờ khai (ToKhaiHQ7N_…) từ các ổ chung sang ổ riêng, "
                              "mỗi Invoice một thư mục.", style="Sub.TLabel").pack(anchor="w")
 
         # 1. Cấu hình
-        box = ttk.LabelFrame(self, text=" 1. Cấu hình đường dẫn ", padding=10)
+        box = ttk.LabelFrame(self, text=" 1. Ổ chung (thư mục TO) & ổ riêng ", padding=10)
         box.pack(fill="x", pady=4)
         box.columnconfigure(1, weight=1)
-        self._path_row(box, 0, "Thư mục TO (ổ chung):", self.var_src, self._pick_src)
-        self._path_row(box, 1, "Thư mục ổ riêng:", self.var_dst, self._pick_dst)
+
+        ttk.Label(box, text="Các ổ chung:", style="Card.TLabel").grid(row=0, column=0, sticky="nw", padx=(0, 8))
+        lwrap = ttk.Frame(box)
+        lwrap.grid(row=0, column=1, sticky="ew")
+        self.lst_roots = tk.Listbox(lwrap, height=4, activestyle="none", font=(theme.FONT, 10),
+                                    selectmode="browse", relief="solid", borderwidth=1,
+                                    highlightthickness=0)
+        lsb = ttk.Scrollbar(lwrap, orient="vertical", command=self.lst_roots.yview)
+        self.lst_roots.configure(yscrollcommand=lsb.set)
+        self.lst_roots.pack(side="left", fill="x", expand=True)
+        lsb.pack(side="right", fill="y")
+        rbtn = ttk.Frame(box, style="Card.TFrame")
+        rbtn.grid(row=0, column=2, sticky="n", padx=(8, 0))
+        ttk.Button(rbtn, text="➕ Thêm ổ…", command=self._add_root).pack(fill="x")
+        ttk.Button(rbtn, text="🗑 Bỏ ổ", command=self._remove_root).pack(fill="x", pady=(4, 0))
+
+        ttk.Label(box, text="Thư mục ổ riêng:", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(box, textvariable=self.var_dst).grid(row=1, column=1, sticky="ew", pady=(8, 0))
+        ttk.Button(box, text="Chọn…", command=self._pick_dst).grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
+
         opts = ttk.Frame(box, style="Card.TFrame")
         opts.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        ttk.Checkbutton(opts, text="Tự quét lại khi không thấy Invoice trong chỉ mục",
+        ttk.Checkbutton(opts, text="Tự đọc/quét lại khi ổ mới hoặc không thấy Invoice trong JSON",
                         variable=self.var_rescan).pack(side="left", padx=(0, 16))
-        ttk.Checkbutton(opts, text="Ghi đè file đã tồn tại", variable=self.var_overwrite).pack(side="left", padx=(0, 16))
+        ttk.Checkbutton(opts, text="Ghi đè file đã có", variable=self.var_overwrite).pack(side="left", padx=(0, 16))
         ttk.Checkbutton(opts, text="Mở thư mục đích khi xong", variable=self.var_open).pack(side="left")
 
         # 2. Chỉ mục
         box2 = ttk.LabelFrame(self, text=" 2. Chỉ mục thư mục (JSON) ", padding=10)
         box2.pack(fill="x", pady=4)
-        self.btn_scan = ttk.Button(box2, text="🔍  ĐỌC THƯ MỤC TO", style="Big.TButton", command=self._scan)
+        self.btn_scan = ttk.Button(box2, text="🔍  ĐỌC THƯ MỤC TO", style="Big.TButton",
+                                   command=lambda: self._scan(None))
         self.btn_scan.pack(side="left")
         self.btn_stop = ttk.Button(box2, text="Dừng", command=self.cancel_event.set, state="disabled")
         self.btn_stop.pack(side="left", padx=8)
-        info = ttk.Frame(box2, style="Card.TFrame")
-        info.pack(side="left", fill="x", expand=True, padx=14)
-        ttk.Label(info, textvariable=self.var_index_info, style="Card.TLabel",
-                  justify="left", wraplength=520).pack(anchor="w")
+        self.lbl_index = ttk.Label(box2, text="", style="Card.TLabel", justify="left")
+        self.lbl_index.pack(side="left", padx=14)
         ttk.Button(box2, text="Mở thư mục config", command=lambda: self._open(str(config_dir()))).pack(side="right")
 
         # 3. Danh sách
@@ -94,25 +110,17 @@ class MainWindow(ttk.Frame):
         bar.pack(fill="x")
         ttk.Button(bar, text="📥 Nhập từ Excel/CSV", command=self._import_excel).pack(side="left")
         ttk.Button(bar, text="📋 Dán từ clipboard", command=self._paste).pack(side="left", padx=6)
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
-        ttk.Label(bar, text="Invoice", style="Card.TLabel").pack(side="left")
-        e1 = ttk.Entry(bar, textvariable=self.var_inv, width=18)
-        e1.pack(side="left", padx=4)
-        ttk.Label(bar, text="Tờ khai", style="Card.TLabel").pack(side="left")
-        e2 = ttk.Entry(bar, textvariable=self.var_tk, width=16)
-        e2.pack(side="left", padx=4)
-        ttk.Button(bar, text="➕ Thêm", command=self._add_manual).pack(side="left")
-        e1.bind("<Return>", lambda _e: e2.focus_set())
-        e2.bind("<Return>", lambda _e: self._add_manual())
+        ttk.Label(bar, text="(hoặc click vào bảng rồi Ctrl+V • chọn dòng + Delete/Backspace để xoá)",
+                  style="Muted.TLabel").pack(side="left", padx=8)
         ttk.Button(bar, text="Xoá tất cả", command=self._clear, style="Danger.TButton").pack(side="right")
-        ttk.Button(bar, text="Xoá dòng chọn", command=self._remove_selected).pack(side="right", padx=6)
+        ttk.Button(bar, text="🧹 Xoá dòng đã copy thành công", command=self._remove_done).pack(side="right", padx=6)
 
         cols = ("invoice", "tokhai", "status", "note")
         wrap = ttk.Frame(box3)
         wrap.pack(fill="both", expand=True, pady=(8, 0))
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="extended", height=8)
-        for c, t, w in (("invoice", "Invoice", 170), ("tokhai", "Số tờ khai", 150),
-                        ("status", "Trạng thái", 150), ("note", "Ghi chú", 420)):
+        for c, t, w in (("invoice", "Invoice", 160), ("tokhai", "Số tờ khai", 140),
+                        ("status", "Trạng thái", 150), ("note", "Ghi chú", 460)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="w")
         sb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
@@ -122,7 +130,14 @@ class MainWindow(ttk.Frame):
         self.tree.tag_configure("ok", foreground=theme.SUCCESS)
         self.tree.tag_configure("warn", foreground=theme.WARN)
         self.tree.tag_configure("err", foreground=theme.DANGER)
-        self.tree.bind("<Delete>", lambda _e: self._remove_selected())
+
+        self.tree.bind("<Button-1>", lambda _e: self.tree.focus_set(), add="+")
+        for seq in ("<Control-v>", "<Control-V>"):
+            self.tree.bind(seq, self._on_tree_paste)
+        for seq in ("<Delete>", "<BackSpace>"):
+            self.tree.bind(seq, self._on_tree_delete)
+        for seq in ("<Control-a>", "<Control-A>"):
+            self.tree.bind(seq, self._on_tree_select_all)
 
         # 4. Chạy
         run = ttk.Frame(self)
@@ -135,27 +150,21 @@ class MainWindow(ttk.Frame):
         self.progress.pack(fill="x")
         ttk.Label(right, textvariable=self.var_summary, style="Sub.TLabel").pack(anchor="w", pady=(3, 0))
 
-        # Log
-        self.log = scrolledtext.ScrolledText(self, height=8, font=("Consolas", 9), state="disabled",
-                                             bg="#111827", fg="#e5e7eb", relief="flat")
-        self.log.pack(fill="both", expand=False, pady=(6, 0))
+        self.log_box = scrolledtext.ScrolledText(self, height=9, font=("Consolas", 9), state="disabled",
+                                                 bg="#111827", fg="#e5e7eb", relief="flat")
+        self.log_box.pack(fill="both", expand=False, pady=(6, 0))
         for tag, color in (("info", "#e5e7eb"), ("ok", "#4ade80"), ("warn", "#fbbf24"), ("error", "#f87171")):
-            self.log.tag_configure(tag, foreground=color)
-
-    def _path_row(self, parent, row, label, var, cmd):
-        ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", pady=3, padx=(0, 8))
-        ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew", pady=3)
-        ttk.Button(parent, text="Chọn…", command=cmd).grid(row=row, column=2, padx=(8, 0), pady=3)
+            self.log_box.tag_configure(tag, foreground=color)
 
     # ============================================================ helpers
     def _log(self, level: str, msg: str) -> None:
-        self.log.configure(state="normal")
-        self.log.insert("end", msg + "\n", level)
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", msg + "\n", level)
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+        file_log(level, msg)
 
     def _save_cfg(self) -> None:
-        self.cfg.source_root = self.var_src.get().strip()
         self.cfg.dest_root = self.var_dst.get().strip()
         self.cfg.auto_rescan = self.var_rescan.get()
         self.cfg.overwrite = self.var_overwrite.get()
@@ -165,15 +174,25 @@ class MainWindow(ttk.Frame):
         except OSError as e:
             self._log("error", f"Không lưu được config: {e}")
 
-    def _refresh_index_info(self) -> None:
-        if self.index.folders:
-            ok = self.index.is_valid_for(self.var_src.get().strip())
-            txt = f"Đã lập chỉ mục {len(self.index.folders):,} thư mục • cập nhật {self.index.updated_at}"
-            if not ok:
-                txt += "\n⚠ Chỉ mục thuộc thư mục khác – hãy bấm “Đọc thư mục to”."
+    def _refresh_roots(self) -> None:
+        sel = self.lst_roots.curselection()
+        self.lst_roots.delete(0, "end")
+        for r in self.cfg.source_roots:
+            n = self.index.root_count(r)
+            if n is None:
+                info = "chưa đọc vào JSON"
+            else:
+                info = f"{n:,} thư mục • đọc lúc {self.index.root_scanned_at(r)}"
+            if not os.path.isdir(r):
+                info += " • ⚠ không truy cập được"
+            self.lst_roots.insert("end", f"{r}    —    {info}")
+        if sel and sel[0] < self.lst_roots.size():
+            self.lst_roots.selection_set(sel[0])
+        if self.index.total:
+            self.lbl_index.configure(text=f"Tổng {self.index.total:,} thư mục trong JSON "
+                                          f"• cập nhật {self.index.updated_at}")
         else:
-            txt = "Chưa có chỉ mục. Chọn thư mục TO rồi bấm “Đọc thư mục to”."
-        self.var_index_info.set(txt)
+            self.lbl_index.configure(text="Chưa có chỉ mục. Thêm ổ chung rồi bấm “Đọc thư mục to”.")
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
@@ -194,14 +213,31 @@ class MainWindow(ttk.Frame):
         except OSError:
             pass
 
-    # ========================================================== pick dirs
-    def _pick_src(self) -> None:
-        d = filedialog.askdirectory(title="Chọn thư mục TO trên ổ chung",
-                                    initialdir=self.var_src.get() or None)
-        if d:
-            self.var_src.set(os.path.normpath(d))
-            self._save_cfg()
-            self._refresh_index_info()
+    # ====================================================== ổ chung / riêng
+    def _add_root(self) -> None:
+        d = filedialog.askdirectory(title="Chọn thư mục TO / ổ chung cần thêm")
+        if not d:
+            return
+        d = norm_root(d)
+        if not self.cfg.add_root(d):
+            messagebox.showinfo(APP_NAME, "Ổ/thư mục này đã có trong danh sách.")
+            return
+        self._save_cfg()
+        self._refresh_roots()
+        if messagebox.askyesno(APP_NAME, f"Đọc {d} và lưu tiếp vào JSON ngay bây giờ?"):
+            self._scan([d])
+
+    def _remove_root(self) -> None:
+        sel = self.lst_roots.curselection()
+        if not sel or self.busy:
+            return
+        root = self.cfg.source_roots[sel[0]]
+        if not messagebox.askyesno(APP_NAME, f"Bỏ “{root}” khỏi danh sách và xoá dữ liệu của ổ này trong JSON?"):
+            return
+        self.cfg.source_roots.pop(sel[0])
+        self.index.remove_root(root)
+        self._save_cfg()
+        self._refresh_roots()
 
     def _pick_dst(self) -> None:
         d = filedialog.askdirectory(title="Chọn thư mục ổ riêng", initialdir=self.var_dst.get() or None)
@@ -222,15 +258,6 @@ class MainWindow(ttk.Frame):
             n += 1
         self.var_summary.set(f"Có {len(self.jobs)} invoice trong danh sách.")
         return n
-
-    def _add_manual(self) -> None:
-        inv = self.var_inv.get().strip()
-        if not inv:
-            messagebox.showwarning(APP_NAME, "Vui lòng nhập Invoice.")
-            return
-        self._add_jobs([Job(inv, self.var_tk.get().strip())])
-        self.var_inv.set("")
-        self.var_tk.set("")
 
     def _import_excel(self) -> None:
         p = filedialog.askopenfilename(
@@ -257,13 +284,41 @@ class MainWindow(ttk.Frame):
         n = self._add_jobs(excel_io.parse_text(text))
         self._log("info", f"Dán {n} dòng từ clipboard.")
 
+    def _on_tree_paste(self, _e=None):
+        if not self.busy:
+            self._paste()
+        return "break"
+
+    def _on_tree_delete(self, _e=None):
+        self._remove_selected()
+        return "break"
+
+    def _on_tree_select_all(self, _e=None):
+        self.tree.selection_set(self.tree.get_children())
+        return "break"
+
+    def _drop(self, iids) -> None:
+        iids = set(iids)
+        for iid in iids:
+            if self.tree.exists(iid):
+                self.tree.delete(iid)
+        self.jobs = [j for j in self.jobs if j.key not in iids]
+        self.var_summary.set(f"Còn {len(self.jobs)} invoice trong danh sách.")
+
     def _remove_selected(self) -> None:
+        if not self.busy:
+            self._drop(self.tree.selection())
+
+    def _remove_done(self) -> None:
+        """Xoá các dòng đã copy thành công; giữ lại dòng lỗi / không tìm được / chưa chạy."""
         if self.busy:
             return
-        sel = set(self.tree.selection())
-        for iid in sel:
-            self.tree.delete(iid)
-        self.jobs = [j for j in self.jobs if j.key not in sel]
+        done = [i for i in self.tree.get_children() if self.tree.item(i, "values")[2] in SUCCESS_STATUSES]
+        if not done:
+            messagebox.showinfo(APP_NAME, "Chưa có dòng nào copy thành công.")
+            return
+        self._drop(done)
+        self._log("info", f"Đã xoá {len(done)} dòng thành công, giữ lại {len(self.jobs)} dòng lỗi/chưa chạy.")
 
     def _clear(self) -> None:
         if self.busy:
@@ -274,35 +329,29 @@ class MainWindow(ttk.Frame):
         self.var_summary.set("Đã xoá danh sách.")
 
     # ============================================================ actions
-    def _validate_paths(self, need_dst: bool) -> bool:
-        src = self.var_src.get().strip()
-        if not src or not os.path.isdir(src):
-            messagebox.showwarning(APP_NAME, "Hãy chọn thư mục TO (ổ chung) hợp lệ.")
-            return False
-        if need_dst and not self.var_dst.get().strip():
-            messagebox.showwarning(APP_NAME, "Hãy chọn thư mục ổ riêng.")
-            return False
-        return True
-
-    def _scan(self) -> None:
-        if not self._validate_paths(need_dst=False):
+    def _scan(self, roots: list[str] | None) -> None:
+        roots = roots or list(self.cfg.source_roots)
+        if not roots:
+            messagebox.showwarning(APP_NAME, "Hãy thêm ít nhất một ổ chung (thư mục TO).")
             return
         self._save_cfg()
         self.cancel_event.clear()
         self._set_busy(True)
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
-        self._log("info", "Đang đọc thư mục to…")
-        src = self.cfg.source_root
+        self._log("info", "Đang đọc: " + ", ".join(roots))
 
         def work():
             try:
-                sr = self.index.scan(src, lambda n, cur: self.events.put(("scan_progress", n, cur)),
+                sr = self.index.scan(roots, lambda n, cur: self.events.put(("scan_progress", n, cur)),
                                      self.cancel_event)
+                for r, (tot, add, rem) in sr.per_root.items():
+                    self.events.put(("log", "ok", f"{r}: {tot:,} thư mục (+{add:,} mới, -{rem:,} đã mất)."))
+                for r in sr.skipped:
+                    self.events.put(("log", "warn", f"{r}: không truy cập được – giữ dữ liệu cũ trong JSON."))
+                if sr.cancelled:
+                    self.events.put(("log", "warn", "Quét bị dừng giữa chừng."))
                 self.events.put(("scan_done", sr))
-                self.events.put(("log", "ok", f"Quét xong: {sr.total:,} thư mục "
-                                              f"(+{sr.added:,} mới, -{sr.removed:,} đã mất)."
-                                 + (" [bị dừng giữa chừng]" if sr.cancelled else "")))
             except Exception as e:  # noqa: BLE001
                 self.events.put(("log", "error", f"Lỗi quét: {e}"))
             self.events.put(("idle",))
@@ -311,9 +360,13 @@ class MainWindow(ttk.Frame):
 
     def _run(self) -> None:
         if not self.jobs:
-            messagebox.showinfo(APP_NAME, "Danh sách trống. Hãy nhập Excel hoặc thêm Invoice.")
+            messagebox.showinfo(APP_NAME, "Danh sách trống. Hãy nhập Excel hoặc dán từ clipboard.")
             return
-        if not self._validate_paths(need_dst=True):
+        if not self.cfg.source_roots:
+            messagebox.showwarning(APP_NAME, "Hãy thêm ít nhất một ổ chung.")
+            return
+        if not self.var_dst.get().strip():
+            messagebox.showwarning(APP_NAME, "Hãy chọn thư mục ổ riêng.")
             return
         self._save_cfg()
         self.cancel_event.clear()
@@ -336,8 +389,7 @@ class MainWindow(ttk.Frame):
     def _poll(self) -> None:
         try:
             while True:
-                ev = self.events.get_nowait()
-                self._handle(ev)
+                self._handle(self.events.get_nowait())
         except queue.Empty:
             pass
         self.after(100, self._poll)
@@ -352,32 +404,30 @@ class MainWindow(ttk.Frame):
         elif kind == "scan_progress":
             self.var_summary.set(f"Đang quét… {ev[1]:,} thư mục")
         elif kind == "scan_done":
-            self._refresh_index_info()
+            self._refresh_roots()
         elif kind == "result":
             self._show_result(ev[1])
         elif kind == "idle":
             self.progress.stop()
             self.progress.configure(mode="determinate", value=0)
             self.var_summary.set("Sẵn sàng.")
-            self._refresh_index_info()
+            self._refresh_roots()
             self._set_busy(False)
         elif kind == "done":
-            self._refresh_index_info()
+            self._refresh_roots()
             self._set_busy(False)
             self._finish_summary()
 
     def _show_result(self, r: JobResult) -> None:
         tag = {STATUS_OK: "ok", STATUS_SKIPPED: "ok", STATUS_NO_FILES: "warn"}.get(r.status, "err")
-        if r.job.key in self.tree.get_children():
+        if self.tree.exists(r.job.key):
             self.tree.item(r.job.key, values=(r.job.invoice, r.job.tokhai, r.status, r.message), tags=(tag,))
             self.tree.see(r.job.key)
 
     def _finish_summary(self) -> None:
-        total = len(self.jobs)
         rows = [self.tree.item(i, "values")[2] for i in self.tree.get_children()]
-        ok = sum(1 for s in rows if s in (STATUS_OK, STATUS_SKIPPED))
-        bad = total - ok
-        self.var_summary.set(f"Xong: {ok} thành công • {bad} lỗi/thiếu • tổng {total}")
+        ok = sum(1 for s in rows if s in SUCCESS_STATUSES)
+        self.var_summary.set(f"Xong: {ok} thành công • {len(rows) - ok} lỗi/thiếu • tổng {len(rows)}")
         if ok and self.var_open.get() and os.path.isdir(self.var_dst.get()):
             self._open(self.var_dst.get())
 
