@@ -23,6 +23,7 @@ class AppConfig:
     open_dest_when_done: bool = True
     tokhai_prefix: str = DEFAULT_TOKHAI_PREFIX
     last_excel_dir: str = ""
+    last_export_dir: str = ""
 
     def add_root(self, root: str) -> bool:
         root = norm_root(root)

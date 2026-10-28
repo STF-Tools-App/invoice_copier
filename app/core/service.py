@@ -5,12 +5,11 @@ Với mỗi Invoice:
   2. Thử lần lượt từng thư mục: có <Invoice>.pdf VÀ file tờ khai đúng số -> lấy.
      Không đủ -> sang thư mục kế tiếp (hết ổ này thì sang ổ khác trong JSON).
   3. Hết mà không có -> ghi log lỗi. Nếu không có thư mục nào khớp -> quét lại các ổ rồi thử lại.
-Ra ổ riêng: <ổ riêng>/<Invoice>/<Invoice>.pdf + <ổ riêng>/<Invoice>/ToKhaiHQ7N_...xls
+Ra ổ riêng: <ổ riêng>/<Invoice>_<TờKhai>/ chứa file PDF + file tờ khai (giữ nguyên tên file gốc)
 """
 from __future__ import annotations
 
 import os
-import re
 import shutil
 from threading import Event
 from typing import Callable, Optional
@@ -21,16 +20,10 @@ from app.core.config import AppConfig
 from app.core.files import find_invoice_pdf, find_tokhai_files
 from app.core.index import FolderIndex
 from app.core.models import Job, JobResult, Resolution
+from app.core.naming import dest_folder_name, invoice_number, tokhai_number_from_file
 
 Emit = Callable[..., None]   # emit(event, *payload)
 Note = Callable[[str, str], None]
-
-_INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-
-def safe_name(name: str) -> str:
-    return _INVALID.sub("_", name.strip()).rstrip(". ") or "_"
-
 
 def root_label(root: str) -> str:
     return os.path.splitdrive(root)[0] or root
@@ -47,13 +40,14 @@ def resolve(job: Job, index: FolderIndex, cfg: AppConfig, note: Optional[Note] =
     if not reachable:
         return Resolution(job, "no_folder", message="Không có thư mục trùng tên Invoice trong JSON")
 
+    num = invoice_number(job.invoice)
     attempts: list[str] = []
     for n, c in enumerate(reachable, 1):
         pdf = find_invoice_pdf(c.path, job.invoice)
         tks = find_tokhai_files(c.path, cfg.tokhai_prefix, job.tokhai)
         problems = []
         if not pdf:
-            problems.append(f"không có {job.invoice}.pdf")
+            problems.append(f"không có {job.invoice}.pdf" + (f" / {num}.pdf" if num and num != job.invoice.strip() else ""))
         if not tks:
             problems.append("không có tờ khai" + (f" {job.tokhai}" if job.tokhai else ""))
         elif len(tks) > 1 and not job.tokhai:
@@ -65,17 +59,20 @@ def resolve(job: Job, index: FolderIndex, cfg: AppConfig, note: Optional[Note] =
             if n < len(reachable):
                 note("info", f"[{job.invoice}] {txt} → thử thư mục tiếp theo")
             continue
+        if os.path.basename(pdf).lower() != f"{job.invoice.strip()}.pdf".lower():
+            note("info", f"[{job.invoice}] Không có {job.invoice}.pdf, dùng {os.path.basename(pdf)}")
         if attempts:
             note("info", f"[{job.invoice}] Lấy được ở {where} sau khi bỏ qua {len(attempts)} thư mục")
+        tk_no = job.tokhai.strip() or tokhai_number_from_file(tks[0], cfg.tokhai_prefix)
         return Resolution(job, "ok", folder=c.path, root=c.root, pdf=pdf,
-                          tokhai_file=tks[0], tried=n)
+                          tokhai_file=tks[0], tokhai_no=tk_no, tried=n)
     return Resolution(job, "no_files", folder=reachable[0].path,
                       message=" | ".join(attempts), tried=len(reachable))
 
 
 # ------------------------------------------------------------------ copy
 def copy_job(res: Resolution, dest_root: str, overwrite: bool) -> JobResult:
-    dest = os.path.join(dest_root, safe_name(res.job.invoice))
+    dest = os.path.join(dest_root, dest_folder_name(res.job.invoice, res.tokhai_no))
     os.makedirs(dest, exist_ok=True)
     copied, skipped = [], []
     for src in (res.pdf, res.tokhai_file):

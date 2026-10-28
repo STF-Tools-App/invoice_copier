@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from datetime import datetime
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from app.constants import (APP_NAME, APP_VERSION, STATUS_NO_FILES, STATUS_OK,
@@ -18,6 +19,7 @@ from app.core.logger import log as file_log
 from app.core.models import Job, JobResult
 from app.core.paths import config_dir, index_file
 from app.core.service import process
+from app.core.table_io import COLUMNS, export_xlsx, rows_to_tsv
 from app.ui import theme
 
 SUCCESS_STATUSES = (STATUS_OK, STATUS_SKIPPED)
@@ -32,6 +34,9 @@ class MainWindow(ttk.Frame):
         self.index.load()
 
         self.jobs: list[Job] = []
+        self.job_map: dict[str, Job] = {}            # iid -> Job (giữ nguyên chuỗi, không bị Tk đổi kiểu số)
+        self.row_state: dict[str, list[str]] = {}    # iid -> [trạng thái, ghi chú]
+        self._anchor: str | None = None              # dòng bắt đầu khi kéo chọn
         self.events: queue.Queue = queue.Queue()
         self.cancel_event = threading.Event()
         self.busy = False
@@ -110,10 +115,14 @@ class MainWindow(ttk.Frame):
         bar.pack(fill="x")
         ttk.Button(bar, text="📥 Nhập từ Excel/CSV", command=self._import_excel).pack(side="left")
         ttk.Button(bar, text="📋 Dán từ clipboard", command=self._paste).pack(side="left", padx=6)
-        ttk.Label(bar, text="(hoặc click vào bảng rồi Ctrl+V • chọn dòng + Delete/Backspace để xoá)",
-                  style="Muted.TLabel").pack(side="left", padx=8)
         ttk.Button(bar, text="Xoá tất cả", command=self._clear, style="Danger.TButton").pack(side="right")
         ttk.Button(bar, text="🧹 Xoá dòng đã copy thành công", command=self._remove_done).pack(side="right", padx=6)
+        ttk.Button(bar, text="📤 Kết xuất Excel", command=self._export_excel,
+                   style="Primary.TButton").pack(side="right")
+        ttk.Label(box3, style="Muted.TLabel", wraplength=940,
+                  text="Ctrl+V dán • Ctrl+C copy dòng chọn • Ctrl+A chọn tất cả • kéo chuột / Shift / Ctrl để chọn nhiều dòng • "
+                       "chuột phải: copy ô / cột / cả bảng • Delete hoặc Backspace xoá dòng chọn"
+                  ).pack(anchor="w", pady=(6, 0))
 
         cols = ("invoice", "tokhai", "status", "note")
         wrap = ttk.Frame(box3)
@@ -131,7 +140,11 @@ class MainWindow(ttk.Frame):
         self.tree.tag_configure("warn", foreground=theme.WARN)
         self.tree.tag_configure("err", foreground=theme.DANGER)
 
-        self.tree.bind("<Button-1>", lambda _e: self.tree.focus_set(), add="+")
+        self.tree.bind("<Button-1>", self._on_tree_click, add="+")
+        self.tree.bind("<B1-Motion>", self._on_tree_drag, add="+")
+        self.tree.bind("<Button-3>", self._on_tree_context)
+        for seq in ("<Control-c>", "<Control-C>"):
+            self.tree.bind(seq, self._on_tree_copy)
         for seq in ("<Control-v>", "<Control-V>"):
             self.tree.bind(seq, self._on_tree_paste)
         for seq in ("<Delete>", "<BackSpace>"):
@@ -254,6 +267,8 @@ class MainWindow(ttk.Frame):
                 continue
             have.add(j.key)
             self.jobs.append(j)
+            self.job_map[j.key] = j
+            self.row_state[j.key] = [STATUS_PENDING, ""]
             self.tree.insert("", "end", iid=j.key, values=(j.invoice, j.tokhai, STATUS_PENDING, ""))
             n += 1
         self.var_summary.set(f"Có {len(self.jobs)} invoice trong danh sách.")
@@ -297,12 +312,145 @@ class MainWindow(ttk.Frame):
         self.tree.selection_set(self.tree.get_children())
         return "break"
 
+    # ------------------------------------------------ copy kiểu Excel
+    def _rows(self, iids=None) -> list[list[str]]:
+        """Dữ liệu bảng dạng chuỗi theo đúng thứ tự hiển thị (không dùng tree.item vì Tk tự đổi chuỗi số)."""
+        want = None if iids is None else set(iids)
+        out = []
+        for iid in self.tree.get_children():
+            if want is not None and iid not in want:
+                continue
+            j = self.job_map[iid]
+            st, note = self.row_state.get(iid, [STATUS_PENDING, ""])
+            out.append([j.invoice, j.tokhai, st, note])
+        return out
+
+    def _set_clipboard(self, text: str, what: str) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update_idletasks()
+        self.var_summary.set(f"Đã copy {what} – dán thẳng vào Excel được (Ctrl+V).")
+
+    def _copy_rows(self, iids, header: bool, what: str) -> None:
+        rows = self._rows(iids)
+        if not rows:
+            self.var_summary.set("Không có dòng nào để copy.")
+            return
+        self._set_clipboard(rows_to_tsv(rows, COLUMNS if header else None), f"{len(rows)} dòng {what}".strip())
+
+    def _copy_column(self, col: int) -> None:
+        rows = self._rows()
+        if not rows:
+            self.var_summary.set("Bảng đang trống.")
+            return
+        self._set_clipboard(rows_to_tsv([[r[col]] for r in rows]),
+                            f"cột “{COLUMNS[col]}” ({len(rows)} dòng)")
+
+    def _copy_cell(self, iid: str, col: int) -> None:
+        row = self._rows([iid])
+        if row:
+            self._set_clipboard(rows_to_tsv([[row[0][col]]]), "1 ô")
+
+    def _on_tree_copy(self, _e=None):
+        sel = self.tree.selection()
+        if sel:
+            self._copy_rows(sel, header=False, what="đã chọn")
+        else:
+            self.var_summary.set("Chưa chọn dòng nào để copy (Ctrl+A để chọn tất cả).")
+        return "break"
+
+    def _on_tree_click(self, e) -> None:
+        self.tree.focus_set()
+        ctrl_or_shift = e.state & 0x0005
+        row = self.tree.identify_row(e.y)
+        self._anchor = row if (row and not ctrl_or_shift
+                               and self.tree.identify_region(e.x, e.y) == "cell") else None
+
+    def _on_tree_drag(self, e) -> None:
+        """Kéo chuột để chọn dải dòng liên tiếp (giống kéo chọn trong Excel)."""
+        if not self._anchor or not self.tree.exists(self._anchor):
+            return
+        kids = self.tree.get_children()
+        row = self.tree.identify_row(e.y)
+        if not row:
+            row = kids[-1] if e.y > self.tree.winfo_height() // 2 else kids[0]
+        a, b = sorted((kids.index(self._anchor), kids.index(row)))
+        self.tree.selection_set(kids[a:b + 1])
+        self.tree.see(row)
+
+    def _on_tree_context(self, e):
+        """Menu chuột phải: copy ô / dòng / cột / cả bảng."""
+        self.tree.focus_set()
+        row = self.tree.identify_row(e.y)
+        col_id = self.tree.identify_column(e.x)
+        col = int(col_id[1:]) - 1 if col_id.startswith("#") else -1
+        col = col if 0 <= col < len(COLUMNS) else -1
+        if row and row not in self.tree.selection():
+            self.tree.selection_set(row)
+        sel = self.tree.selection()
+        has_rows = bool(self.tree.get_children())
+
+        m = tk.Menu(self.tree, tearoff=0)
+        st = lambda ok: "normal" if ok else "disabled"          # noqa: E731
+        m.add_command(label="Copy ô", state=st(row and col >= 0),
+                      command=lambda: self._copy_cell(row, col))
+        m.add_command(label=f"Copy cột “{COLUMNS[col]}”" if col >= 0 else "Copy cột",
+                      state=st(has_rows and col >= 0), command=lambda: self._copy_column(col))
+        m.add_separator()
+        m.add_command(label=f"Copy {len(sel)} dòng chọn  (Ctrl+C)", state=st(sel),
+                      command=lambda: self._copy_rows(sel, False, "đã chọn"))
+        m.add_command(label="Copy dòng chọn kèm tiêu đề", state=st(sel),
+                      command=lambda: self._copy_rows(sel, True, "đã chọn (kèm tiêu đề)"))
+        m.add_command(label="Copy toàn bộ bảng (kèm tiêu đề)", state=st(has_rows),
+                      command=lambda: self._copy_rows(None, True, "của cả bảng"))
+        m.add_separator()
+        m.add_command(label="Dán từ clipboard  (Ctrl+V)", state=st(not self.busy), command=self._paste)
+        m.add_command(label="Xoá dòng chọn  (Delete)", state=st(sel and not self.busy),
+                      command=self._remove_selected)
+        m.add_command(label="Kết xuất Excel…", state=st(has_rows), command=self._export_excel)
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+        return "break"
+
+    # ------------------------------------------------ kết xuất Excel
+    def _export_excel(self) -> None:
+        rows = self._rows()
+        if not rows:
+            messagebox.showinfo(APP_NAME, "Bảng đang trống, không có gì để kết xuất.")
+            return
+        default = f"ketqua_invoice_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+        path = filedialog.asksaveasfilename(
+            title="Kết xuất trạng thái bảng ra Excel", defaultextension=".xlsx",
+            initialfile=default, initialdir=self.cfg.last_export_dir or self.var_dst.get() or None,
+            filetypes=[("Excel", "*.xlsx")])
+        if not path:
+            return
+        try:
+            export_xlsx(path, rows)
+        except PermissionError:
+            messagebox.showerror(APP_NAME, "Không ghi được file – có thể file đang mở trong Excel. "
+                                           "Hãy đóng file hoặc chọn tên khác.")
+            return
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror(APP_NAME, f"Không kết xuất được:\n{e}")
+            return
+        self.cfg.last_export_dir = os.path.dirname(path)
+        self._save_cfg()
+        self._log("ok", f"Đã kết xuất {len(rows)} dòng → {path}")
+        if messagebox.askyesno(APP_NAME, f"Đã kết xuất {len(rows)} dòng.\nMở file ngay?"):
+            self._open(path)
+
     def _drop(self, iids) -> None:
         iids = set(iids)
         for iid in iids:
             if self.tree.exists(iid):
                 self.tree.delete(iid)
         self.jobs = [j for j in self.jobs if j.key not in iids]
+        for iid in iids:
+            self.job_map.pop(iid, None)
+            self.row_state.pop(iid, None)
         self.var_summary.set(f"Còn {len(self.jobs)} invoice trong danh sách.")
 
     def _remove_selected(self) -> None:
@@ -313,7 +461,8 @@ class MainWindow(ttk.Frame):
         """Xoá các dòng đã copy thành công; giữ lại dòng lỗi / không tìm được / chưa chạy."""
         if self.busy:
             return
-        done = [i for i in self.tree.get_children() if self.tree.item(i, "values")[2] in SUCCESS_STATUSES]
+        done = [i for i in self.tree.get_children()
+                if self.row_state.get(i, [""])[0] in SUCCESS_STATUSES]
         if not done:
             messagebox.showinfo(APP_NAME, "Chưa có dòng nào copy thành công.")
             return
@@ -325,6 +474,8 @@ class MainWindow(ttk.Frame):
             return
         self.tree.delete(*self.tree.get_children())
         self.jobs.clear()
+        self.job_map.clear()
+        self.row_state.clear()
         self.progress["value"] = 0
         self.var_summary.set("Đã xoá danh sách.")
 
@@ -373,6 +524,7 @@ class MainWindow(ttk.Frame):
         self._set_busy(True)
         self.progress.configure(mode="determinate", maximum=len(self.jobs), value=0)
         for j in self.jobs:
+            self.row_state[j.key] = [STATUS_PENDING, ""]
             self.tree.item(j.key, values=(j.invoice, j.tokhai, STATUS_PENDING, ""), tags=())
         jobs = list(self.jobs)
 
@@ -421,11 +573,12 @@ class MainWindow(ttk.Frame):
     def _show_result(self, r: JobResult) -> None:
         tag = {STATUS_OK: "ok", STATUS_SKIPPED: "ok", STATUS_NO_FILES: "warn"}.get(r.status, "err")
         if self.tree.exists(r.job.key):
+            self.row_state[r.job.key] = [r.status, r.message]
             self.tree.item(r.job.key, values=(r.job.invoice, r.job.tokhai, r.status, r.message), tags=(tag,))
             self.tree.see(r.job.key)
 
     def _finish_summary(self) -> None:
-        rows = [self.tree.item(i, "values")[2] for i in self.tree.get_children()]
+        rows = [self.row_state.get(i, [""])[0] for i in self.tree.get_children()]
         ok = sum(1 for s in rows if s in SUCCESS_STATUSES)
         self.var_summary.set(f"Xong: {ok} thành công • {len(rows) - ok} lỗi/thiếu • tổng {len(rows)}")
         if ok and self.var_open.get() and os.path.isdir(self.var_dst.get()):

@@ -33,6 +33,7 @@ class Resolution:
     root: Optional[str] = None
     pdf: Optional[str] = None
     tokhai_file: Optional[str] = None
+    tokhai_no: str = ""
     message: str = ""
     tried: int = 0              # số thư mục đã thử
 

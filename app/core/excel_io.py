@@ -82,10 +82,16 @@ def parse_text(text: str) -> list[Job]:
     for n, line in enumerate(text.splitlines()):
         if n == 0 and _fold(line).startswith(("invoice", "so invoice", "inv ")):
             continue                      # bỏ dòng tiêu đề khi copy từ Excel
-        parts = [p for p in re.split(r"[\t,;]+|\s+", line.strip()) if p]
-        if not parts:
-            continue
-        job = Job(parts[0], parts[1] if len(parts) > 1 else "")
+        if "\t" in line:                 # copy từ Excel / từ bảng: giữ ô trống đúng cột
+            cells = [c.strip() for c in line.split("\t")]
+            if not cells[0]:
+                continue
+            job = Job(cells[0], cells[1] if len(cells) > 1 else "")
+        else:
+            parts = [p for p in re.split(r"[,;]+|\s+", line.strip()) if p]
+            if not parts:
+                continue
+            job = Job(parts[0], parts[1] if len(parts) > 1 else "")
         if job.key not in seen:
             seen.add(job.key)
             jobs.append(job)

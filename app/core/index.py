@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from bisect import bisect_left
 from datetime import datetime
 from pathlib import Path
@@ -20,8 +21,10 @@ from threading import Event
 from typing import Callable, Iterable, Optional
 
 from app.core.models import Candidate, ScanResult
+from app.core.naming import invoice_number
 
 ProgressCb = Callable[[int, str], None]
+_NUM = re.compile(r"(?<!\d)\d{4,}(?!\d)")
 
 
 def _key(p: str) -> str:
@@ -37,6 +40,7 @@ class FolderIndex:
         self.roots: dict[str, list[str]] = {}
         self.scanned_at: dict[str, str] = {}
         self._sorted: list[tuple[str, str, str]] = []
+        self._by_num: dict[str, list[int]] = {}
         self._rebuild()
 
     # ---------- lưu / đọc ----------
@@ -73,6 +77,10 @@ class FolderIndex:
         self._sorted = sorted(
             (os.path.basename(p).upper(), p, root)
             for root, folders in self.roots.items() for p in folders)
+        self._by_num = {}
+        for i, (name, _p, _r) in enumerate(self._sorted):
+            for m in _NUM.finditer(name):
+                self._by_num.setdefault(m.group(), []).append(i)
 
     # ---------- thông tin ----------
     def root_count(self, root: str) -> Optional[int]:
@@ -169,23 +177,41 @@ class FolderIndex:
 
     # ---------- tra cứu ----------
     def find_folders(self, invoice: str, root_order: Optional[list[str]] = None) -> list[Candidate]:
-        """Thư mục trùng tên Invoice hoặc bắt đầu bằng Invoice + ký tự phân tách.
+        """Các thư mục ứng viên cho một Invoice, xếp theo độ ưu tiên.
 
-        'ISG-240010' khớp 'ISG-240010 DHL ETT', KHÔNG khớp 'ISG-2400101'.
-        Thứ tự: theo ổ (thứ tự trong config, ổ khác xếp sau) -> khớp chính xác -> thư mục nông nhất.
+        Mức 0: tên = Invoice hoặc bắt đầu bằng Invoice + ký tự phân tách
+               ('ISG-240010' khớp 'ISG-240010 DHL ETT', KHÔNG khớp 'ISG-2400101').
+        Mức 1: bắt đầu bằng phần số của Invoice ('240010 DHL ...').
+        Mức 2: tên thư mục chứa riêng dãy số đó ('... ISG-240010 ...', nhập '240010' vẫn thấy).
+        Trong cùng mức: theo ổ (thứ tự config; ổ khác xếp sau) -> khớp chính xác -> thư mục nông nhất.
         """
         key = invoice.strip().upper()
         if not key:
             return []
+        num = invoice_number(key)
         rank = {_key(r): i for i, r in enumerate(root_order or [])}
         names = self._sorted
-        i = bisect_left(names, (key, "", ""))
-        found = []
-        while i < len(names) and names[i][0].startswith(key):
-            name, path, root = names[i]
-            if name == key or not name[len(key)].isalnum():
-                found.append((rank.get(_key(root), len(rank)), name != key,
-                              path.count(os.sep), path, root))
-            i += 1
-        found.sort()
-        return [Candidate(root=f[4], path=f[3]) for f in found]
+        found: dict[str, tuple] = {}
+
+        def add(tier: int, name: str, path: str, root: str, exact: bool) -> None:
+            if path not in found:
+                found[path] = (tier, rank.get(_key(root), len(rank)), not exact,
+                               path.count(os.sep), path, root)
+
+        def prefix_scan(k: str, tier: int) -> None:
+            i = bisect_left(names, (k, "", ""))
+            while i < len(names) and names[i][0].startswith(k):
+                name, path, root = names[i]
+                if name == k or not name[len(k)].isalnum():
+                    add(tier, name, path, root, name == k)
+                i += 1
+
+        prefix_scan(key, 0)
+        if num:
+            if num != key:
+                prefix_scan(num, 1)
+            for i in self._by_num.get(num, []):
+                name, path, root = names[i]
+                add(2, name, path, root, False)
+
+        return [Candidate(root=f[5], path=f[4]) for f in sorted(found.values())]
