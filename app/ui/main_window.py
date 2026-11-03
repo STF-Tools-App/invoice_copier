@@ -10,7 +10,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from app.constants import (APP_NAME, APP_VERSION, STATUS_NO_FILES, STATUS_OK,
+from app.constants import (APP_NAME, APP_VERSION, STATUS_MULTI, STATUS_NO_FILES, STATUS_OK,
                            STATUS_PENDING, STATUS_SKIPPED)
 from app.core import excel_io
 from app.core.config import AppConfig, norm_root
@@ -20,9 +20,11 @@ from app.core.models import Job, JobResult
 from app.core.paths import config_dir, index_file
 from app.core.service import process
 from app.core.table_io import COLUMNS, export_xlsx, rows_to_tsv
+from app.ui.ignored_tokens_window import IgnoredTokensWindow
 from app.ui import theme
 
 SUCCESS_STATUSES = (STATUS_OK, STATUS_SKIPPED)
+DONE_STATUSES = SUCCESS_STATUSES + (STATUS_MULTI,)
 
 
 class MainWindow(ttk.Frame):
@@ -46,6 +48,7 @@ class MainWindow(ttk.Frame):
         self.var_overwrite = tk.BooleanVar(value=self.cfg.overwrite)
         self.var_open = tk.BooleanVar(value=self.cfg.open_dest_when_done)
         self.var_summary = tk.StringVar(value="Sẵn sàng.")
+        self.var_ignore_token = tk.StringVar()
 
         root.title(f"{APP_NAME} v{APP_VERSION}")
         root.geometry("1020x860")
@@ -62,8 +65,6 @@ class MainWindow(ttk.Frame):
         head = ttk.Frame(self)
         head.pack(fill="x", pady=(0, 8))
         ttk.Label(head, text="📁 Invoice Copier", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(head, text="Copy Invoice (.pdf) + Tờ khai (ToKhaiHQ7N_…) từ các ổ chung sang ổ riêng, "
-                             "mỗi Invoice một thư mục.", style="Sub.TLabel").pack(anchor="w")
 
         # 1. Cấu hình
         box = ttk.LabelFrame(self, text=" 1. Ổ chung (thư mục TO) & ổ riêng ", padding=10)
@@ -104,9 +105,15 @@ class MainWindow(ttk.Frame):
         self.btn_scan.pack(side="left")
         self.btn_stop = ttk.Button(box2, text="Dừng", command=self.cancel_event.set, state="disabled")
         self.btn_stop.pack(side="left", padx=8)
-        self.lbl_index = ttk.Label(box2, text="", style="Card.TLabel", justify="left")
-        self.lbl_index.pack(side="left", padx=14)
         ttk.Button(box2, text="Mở thư mục config", command=lambda: self._open(str(config_dir()))).pack(side="right")
+        ttk.Button(box2, text="⌕", width=3, command=self._show_ignored_tokens).pack(side="right", padx=(0, 6))
+        ttk.Button(box2, text="➤", width=3, command=self._add_ignored_token).pack(side="right", padx=(0, 4))
+        self.ignore_entry = ttk.Entry(box2, textvariable=self.var_ignore_token, width=22)
+        self.ignore_entry.pack(side="right", padx=(0, 4))
+        ttk.Label(box2, text="Bỏ PDF chứa:", style="Card.TLabel").pack(side="right", padx=(8, 4))
+        self.ignore_entry.bind("<Return>", lambda _e: self._add_ignored_token())
+        self.ignore_entry.bind("<Control-v>", self._paste_ignored_tokens)
+        self.ignore_entry.bind("<Control-V>", self._paste_ignored_tokens)
 
         # 3. Danh sách
         box3 = ttk.LabelFrame(self, text=" 3. Danh sách Invoice & Tờ khai ", padding=10)
@@ -119,11 +126,6 @@ class MainWindow(ttk.Frame):
         ttk.Button(bar, text="🧹 Xoá dòng đã copy thành công", command=self._remove_done).pack(side="right", padx=6)
         ttk.Button(bar, text="📤 Kết xuất Excel", command=self._export_excel,
                    style="Primary.TButton").pack(side="right")
-        ttk.Label(box3, style="Muted.TLabel", wraplength=940,
-                  text="Ctrl+V dán • Ctrl+C copy dòng chọn • Ctrl+A chọn tất cả • kéo chuột / Shift / Ctrl để chọn nhiều dòng • "
-                       "chuột phải: copy ô / cột / cả bảng • Delete hoặc Backspace xoá dòng chọn"
-                  ).pack(anchor="w", pady=(6, 0))
-
         cols = ("invoice", "tokhai", "status", "note")
         wrap = ttk.Frame(box3)
         wrap.pack(fill="both", expand=True, pady=(8, 0))
@@ -139,6 +141,7 @@ class MainWindow(ttk.Frame):
         self.tree.tag_configure("ok", foreground=theme.SUCCESS)
         self.tree.tag_configure("warn", foreground=theme.WARN)
         self.tree.tag_configure("err", foreground=theme.DANGER)
+        self.tree.tag_configure("multi", foreground="#5b21b6", background="#ddd6fe")
 
         self.tree.bind("<Button-1>", self._on_tree_click, add="+")
         self.tree.bind("<B1-Motion>", self._on_tree_drag, add="+")
@@ -182,10 +185,38 @@ class MainWindow(ttk.Frame):
         self.cfg.auto_rescan = self.var_rescan.get()
         self.cfg.overwrite = self.var_overwrite.get()
         self.cfg.open_dest_when_done = self.var_open.get()
+        self.cfg.ignored_pdf_tokens = list(dict.fromkeys(self.cfg.ignored_pdf_tokens))
         try:
             self.cfg.save()
         except OSError as e:
             self._log("error", f"Không lưu được config: {e}")
+
+    def _paste_ignored_tokens(self, _event=None):
+        try:
+            pasted = self.root.clipboard_get()
+        except tk.TclError:
+            return "break"
+        parts = [p.strip() for row in pasted.splitlines() for p in row.split("\t") if p.strip()]
+        if len(parts) > 1:
+            self.var_ignore_token.set("\n".join(parts))
+        else:
+            self.var_ignore_token.set(pasted.strip())
+        self._add_ignored_token()
+        return "break"
+
+    def _add_ignored_token(self):
+        raw = self.var_ignore_token.get()
+        tokens = [p.strip() for row in raw.splitlines() for p in row.split("\t") if p.strip()]
+        if not tokens:
+            return
+        existing = {p.casefold() for p in self.cfg.ignored_pdf_tokens}
+        self.cfg.ignored_pdf_tokens.extend(p for p in tokens if p.casefold() not in existing)
+        self.var_ignore_token.set("")
+        self._save_cfg()
+        self.var_summary.set(f"Đã lưu {len(self.cfg.ignored_pdf_tokens)} ký tự loại trừ.")
+
+    def _show_ignored_tokens(self):
+        IgnoredTokensWindow(self.root, self.cfg.ignored_pdf_tokens, self._save_cfg)
 
     def _refresh_roots(self) -> None:
         sel = self.lst_roots.curselection()
@@ -201,11 +232,6 @@ class MainWindow(ttk.Frame):
             self.lst_roots.insert("end", f"{r}    —    {info}")
         if sel and sel[0] < self.lst_roots.size():
             self.lst_roots.selection_set(sel[0])
-        if self.index.total:
-            self.lbl_index.configure(text=f"Tổng {self.index.total:,} thư mục trong JSON "
-                                          f"• cập nhật {self.index.updated_at}")
-        else:
-            self.lbl_index.configure(text="Chưa có chỉ mục. Thêm ổ chung rồi bấm “Đọc thư mục to”.")
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
@@ -467,7 +493,20 @@ class MainWindow(ttk.Frame):
             messagebox.showinfo(APP_NAME, "Chưa có dòng nào copy thành công.")
             return
         self._drop(done)
-        self._log("info", f"Đã xoá {len(done)} dòng thành công, giữ lại {len(self.jobs)} dòng lỗi/chưa chạy.")
+        self._sort_rows()
+        multi = sum(1 for i in self.tree.get_children()
+                    if self.row_state.get(i, [""])[0] == STATUS_MULTI)
+        self._log("info", f"Đã xoá {len(done)} dòng thành công, giữ lại {len(self.jobs)} dòng "
+                          f"({multi} dòng nhiều Inv xếp trên cùng, dòng lỗi xếp dưới cùng).")
+
+    def _sort_rows(self) -> None:
+        """Xếp trường hợp nhiều PDF lên đầu, rồi dòng chưa chạy và các lỗi."""
+        kids = list(self.tree.get_children())
+        order = sorted(kids, key=lambda i: (0 if self.row_state.get(i, [""])[0] == STATUS_MULTI else 1))
+        for pos, iid in enumerate(order):
+            self.tree.move(iid, "", pos)
+        by_key = {j.key: j for j in self.jobs}
+        self.jobs = [by_key[i] for i in order if i in by_key]
 
     def _clear(self) -> None:
         if self.busy:
@@ -571,7 +610,8 @@ class MainWindow(ttk.Frame):
             self._finish_summary()
 
     def _show_result(self, r: JobResult) -> None:
-        tag = {STATUS_OK: "ok", STATUS_SKIPPED: "ok", STATUS_NO_FILES: "warn"}.get(r.status, "err")
+        tag = {STATUS_OK: "ok", STATUS_SKIPPED: "ok", STATUS_NO_FILES: "warn",
+               STATUS_MULTI: "multi"}.get(r.status, "err")
         if self.tree.exists(r.job.key):
             self.row_state[r.job.key] = [r.status, r.message]
             self.tree.item(r.job.key, values=(r.job.invoice, r.job.tokhai, r.status, r.message), tags=(tag,))
@@ -579,8 +619,10 @@ class MainWindow(ttk.Frame):
 
     def _finish_summary(self) -> None:
         rows = [self.row_state.get(i, [""])[0] for i in self.tree.get_children()]
-        ok = sum(1 for s in rows if s in SUCCESS_STATUSES)
-        self.var_summary.set(f"Xong: {ok} thành công • {len(rows) - ok} lỗi/thiếu • tổng {len(rows)}")
+        ok = sum(1 for s in rows if s in DONE_STATUSES)
+        multi = sum(1 for s in rows if s == STATUS_MULTI)
+        extra = f" (có {multi} dòng nhiều Inv – màu tím)" if multi else ""
+        self.var_summary.set(f"Xong: {ok} thành công{extra} • {len(rows) - ok} lỗi/thiếu • tổng {len(rows)}")
         if ok and self.var_open.get() and os.path.isdir(self.var_dst.get()):
             self._open(self.var_dst.get())
 

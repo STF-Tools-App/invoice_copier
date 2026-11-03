@@ -13,6 +13,7 @@ TOKHAI_EXTENSIONS = (".xls", ".xlsx", ".xlsm")
 STATUS_PENDING = "Chờ xử lý"
 STATUS_OK = "Đã copy"
 STATUS_SKIPPED = "Đã có (bỏ qua)"
+STATUS_MULTI = "Đã copy (nhiều Inv)"   # Có nhiều file PDF khớp Invoice; đã copy tất cả, cần kiểm tra lại
 STATUS_NO_FOLDER = "Không thấy thư mục"
 STATUS_NO_FILES = "Thiếu file"
 STATUS_ERROR = "Lỗi"

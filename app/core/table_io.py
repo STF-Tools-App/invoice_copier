@@ -3,10 +3,30 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from app.constants import STATUS_NO_FILES, STATUS_OK, STATUS_PENDING, STATUS_SKIPPED
+from app.constants import (STATUS_MULTI, STATUS_NO_FILES, STATUS_OK,
+                           STATUS_PENDING, STATUS_SKIPPED)
 
 COLUMNS = ("Invoice", "Số tờ khai", "Trạng thái", "Ghi chú")
 _OK = {STATUS_OK, STATUS_SKIPPED}
+
+
+def row_kind(status: str) -> str:
+    if status in _OK:
+        return "ok"
+    if status == STATUS_MULTI:
+        return "multi"
+    if status == STATUS_NO_FILES:
+        return "warn"
+    if status == STATUS_PENDING or not status:
+        return "pending"
+    return "err"
+
+
+_RANK = {"multi": 0, "pending": 1, "ok": 2, "warn": 3, "err": 3}
+
+
+def sort_rank(status: str) -> int:
+    return _RANK[row_kind(status)]
 
 
 def _clean(v: object) -> str:
@@ -47,17 +67,17 @@ def export_xlsx(path: str, rows: Sequence[Sequence[str]], title: str = "Danh sá
         c.border = border
 
     fills = {"ok": PatternFill("solid", fgColor="DCFCE7"),
+             "multi": PatternFill("solid", fgColor="DDD6FE"),
              "warn": PatternFill("solid", fgColor="FEF3C7"),
              "err": PatternFill("solid", fgColor="FEE2E2")}
     for i, r in enumerate(rows, 1):
         status = r[2] if len(r) > 2 else ""
         ws.append([i] + [str(x) for x in r])
-        kind = ("ok" if status in _OK else "warn" if status == STATUS_NO_FILES
-                else None if status == STATUS_PENDING else "err")
+        kind = row_kind(status)
         for c in ws[ws.max_row]:
             c.border = border
             c.alignment = Alignment(vertical="top", wrap_text=(c.column == 5))
-            if kind:
+            if kind != "pending":
                 c.fill = fills[kind]
             if c.column in (2, 3):          # Invoice / Tờ khai luôn là văn bản (tránh 1.06E+11)
                 c.number_format = "@"

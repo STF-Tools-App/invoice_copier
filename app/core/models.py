@@ -32,6 +32,7 @@ class Resolution:
     folder: Optional[str] = None
     root: Optional[str] = None
     pdf: Optional[str] = None
+    pdfs: list[str] = field(default_factory=list)
     tokhai_file: Optional[str] = None
     tokhai_no: str = ""
     message: str = ""

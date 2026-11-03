@@ -48,5 +48,9 @@ def config_file() -> Path:
     return config_dir() / CONFIG_FILENAME
 
 
+def ignored_pdf_tokens_file() -> Path:
+    return config_dir() / "ignored_pdf_tokens.json"
+
+
 def index_file() -> Path:
     return config_dir() / INDEX_FILENAME

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from app.constants import DEFAULT_TOKHAI_PREFIX
-from app.core.paths import config_file
+from app.core.paths import config_file, ignored_pdf_tokens_file
 
 
 def norm_root(p: str) -> str:
@@ -24,6 +24,7 @@ class AppConfig:
     tokhai_prefix: str = DEFAULT_TOKHAI_PREFIX
     last_excel_dir: str = ""
     last_export_dir: str = ""
+    ignored_pdf_tokens: list[str] = field(default_factory=lambda: ["PLV", "PL V", "CO"])
 
     def add_root(self, root: str) -> bool:
         root = norm_root(root)
@@ -45,6 +46,13 @@ class AppConfig:
         for k, v in data.items():
             if k in known:
                 setattr(cfg, k, v)
+        try:
+            tokens = json.loads(ignored_pdf_tokens_file().read_text(encoding="utf-8"))
+            if isinstance(tokens, list):
+                cfg.ignored_pdf_tokens = list(dict.fromkeys(
+                    str(token).strip() for token in tokens if str(token).strip()))
+        except (OSError, ValueError):
+            pass
         legacy = data.get("source_root")          # bản cũ chỉ có 1 ổ
         if legacy:
             cfg.add_root(legacy)
@@ -53,5 +61,11 @@ class AppConfig:
     def save(self, path: Path | None = None) -> None:
         path = path or config_file()
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
+        data = asdict(self)
+        tokens = data.pop("ignored_pdf_tokens", [])
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
+        token_path = ignored_pdf_tokens_file()
+        token_tmp = token_path.with_suffix(".tmp")
+        token_tmp.write_text(json.dumps(tokens, ensure_ascii=False, indent=2), encoding="utf-8")
+        token_tmp.replace(token_path)

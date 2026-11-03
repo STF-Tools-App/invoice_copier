@@ -14,10 +14,10 @@ import shutil
 from threading import Event
 from typing import Callable, Optional
 
-from app.constants import (STATUS_ERROR, STATUS_NO_FILES, STATUS_NO_FOLDER,
+from app.constants import (STATUS_ERROR, STATUS_MULTI, STATUS_NO_FILES, STATUS_NO_FOLDER,
                            STATUS_OK, STATUS_SKIPPED)
 from app.core.config import AppConfig
-from app.core.files import find_invoice_pdf, find_tokhai_files
+from app.core.files import find_invoice_pdfs, find_tokhai_files
 from app.core.index import FolderIndex
 from app.core.models import Job, JobResult, Resolution
 from app.core.naming import dest_folder_name, invoice_number, tokhai_number_from_file
@@ -43,11 +43,11 @@ def resolve(job: Job, index: FolderIndex, cfg: AppConfig, note: Optional[Note] =
     num = invoice_number(job.invoice)
     attempts: list[str] = []
     for n, c in enumerate(reachable, 1):
-        pdf = find_invoice_pdf(c.path, job.invoice)
+        pdfs = find_invoice_pdfs(c.path, job.invoice, tuple(cfg.ignored_pdf_tokens))
         tks = find_tokhai_files(c.path, cfg.tokhai_prefix, job.tokhai)
         problems = []
-        if not pdf:
-            problems.append(f"không có {job.invoice}.pdf" + (f" / {num}.pdf" if num and num != job.invoice.strip() else ""))
+        if not pdfs:
+            problems.append(f"không có file PDF chứa {num or job.invoice.strip()}")
         if not tks:
             problems.append("không có tờ khai" + (f" {job.tokhai}" if job.tokhai else ""))
         elif len(tks) > 1 and not job.tokhai:
@@ -59,12 +59,15 @@ def resolve(job: Job, index: FolderIndex, cfg: AppConfig, note: Optional[Note] =
             if n < len(reachable):
                 note("info", f"[{job.invoice}] {txt} → thử thư mục tiếp theo")
             continue
-        if os.path.basename(pdf).lower() != f"{job.invoice.strip()}.pdf".lower():
-            note("info", f"[{job.invoice}] Không có {job.invoice}.pdf, dùng {os.path.basename(pdf)}")
+        if len(pdfs) > 1:
+            note("warn", f"[{job.invoice}] Có nhiều hơn một file Inv ({len(pdfs)} file PDF): "
+                         + ", ".join(os.path.basename(p) for p in pdfs) + " → lấy tất cả")
+        elif os.path.basename(pdfs[0]).lower() != f"{job.invoice.strip()}.pdf".lower():
+            note("info", f"[{job.invoice}] Dùng file {os.path.basename(pdfs[0])}")
         if attempts:
             note("info", f"[{job.invoice}] Lấy được ở {where} sau khi bỏ qua {len(attempts)} thư mục")
         tk_no = job.tokhai.strip() or tokhai_number_from_file(tks[0], cfg.tokhai_prefix)
-        return Resolution(job, "ok", folder=c.path, root=c.root, pdf=pdf,
+        return Resolution(job, "ok", folder=c.path, root=c.root, pdf=pdfs[0], pdfs=pdfs,
                           tokhai_file=tks[0], tokhai_no=tk_no, tried=n)
     return Resolution(job, "no_files", folder=reachable[0].path,
                       message=" | ".join(attempts), tried=len(reachable))
@@ -75,16 +78,28 @@ def copy_job(res: Resolution, dest_root: str, overwrite: bool) -> JobResult:
     dest = os.path.join(dest_root, dest_folder_name(res.job.invoice, res.tokhai_no))
     os.makedirs(dest, exist_ok=True)
     copied, skipped = [], []
-    for src in (res.pdf, res.tokhai_file):
-        target = os.path.join(dest, os.path.basename(src))
+    pdfs = res.pdfs or ([res.pdf] if res.pdf else [])
+    used = set()
+    for src in [*pdfs, res.tokhai_file]:
+        name = os.path.basename(src)
+        if name.casefold() in used:
+            stem, ext = os.path.splitext(name)
+            suffix = 2
+            while f"{stem}_{suffix}{ext}".casefold() in used:
+                suffix += 1
+            name = f"{stem}_{suffix}{ext}"
+        used.add(name.casefold())
+        target = os.path.join(dest, name)
         if (os.path.exists(target) and not overwrite
                 and os.path.getsize(target) == os.path.getsize(src)):
-            skipped.append(os.path.basename(src))
+            skipped.append(name)
             continue
         shutil.copy2(src, target)
-        copied.append(os.path.basename(src))
-    status = STATUS_OK if copied else STATUS_SKIPPED
+        copied.append(name)
+    status = STATUS_MULTI if len(pdfs) > 1 else STATUS_OK if copied else STATUS_SKIPPED
     msg = ", ".join(copied or skipped) + f"  ← {os.path.basename(res.folder)} [{root_label(res.root or '')}]"
+    if len(pdfs) > 1:
+        msg = f"⚠ Có nhiều hơn 1 file Inv ({len(pdfs)} file PDF) – đã lấy tất cả. " + msg
     return JobResult(res.job, status, msg, dest, copied + skipped)
 
 
@@ -137,7 +152,8 @@ def process(jobs: list[Job], cfg: AppConfig, index: FolderIndex, emit: Emit,
             else:
                 try:
                     r = copy_job(res, cfg.dest_root, cfg.overwrite)
-                    log("ok" if r.status == STATUS_OK else "info", f"[{job.invoice}] {r.status}: {r.message}")
+                    level = {STATUS_OK: "ok", STATUS_MULTI: "warn"}.get(r.status, "info")
+                    log(level, f"[{job.invoice}] {r.status}: {r.message}")
                     finish(r)
                 except OSError as e:
                     log("error", f"[{job.invoice}] Lỗi copy: {e}")
@@ -163,6 +179,9 @@ def process(jobs: list[Job], cfg: AppConfig, index: FolderIndex, emit: Emit,
         finish(JobResult(res.job, STATUS_NO_FOLDER, res.message))
 
     out = list(results.values())
-    ok = sum(1 for r in out if r.status in (STATUS_OK, STATUS_SKIPPED))
-    log("info", f"Hoàn tất: {ok}/{len(jobs)} thành công, {len(jobs) - ok} lỗi/thiếu.")
+    ok = sum(1 for r in out if r.status in (STATUS_OK, STATUS_SKIPPED, STATUS_MULTI))
+    multi = sum(1 for r in out if r.status == STATUS_MULTI)
+    log("info", f"Hoàn tất: {ok}/{len(jobs)} thành công"
+                f"{f' (trong đó {multi} invoice có nhiều hơn 1 file Inv)' if multi else ''}, "
+                f"{len(jobs) - ok} lỗi/thiếu.")
     return out
