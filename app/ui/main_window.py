@@ -46,6 +46,7 @@ class MainWindow(ttk.Frame):
         self.var_dst = tk.StringVar(value=self.cfg.dest_root)
         self.var_rescan = tk.BooleanVar(value=self.cfg.auto_rescan)
         self.var_overwrite = tk.BooleanVar(value=self.cfg.overwrite)
+        self.var_overwrite_folder = tk.BooleanVar(value=self.cfg.overwrite_folder)
         self.var_open = tk.BooleanVar(value=self.cfg.open_dest_when_done)
         self.var_summary = tk.StringVar(value="Sẵn sàng.")
         self.var_ignore_token = tk.StringVar()
@@ -95,6 +96,7 @@ class MainWindow(ttk.Frame):
         ttk.Checkbutton(opts, text="Tự đọc/quét lại khi ổ mới hoặc không thấy Invoice trong JSON",
                         variable=self.var_rescan).pack(side="left", padx=(0, 16))
         ttk.Checkbutton(opts, text="Ghi đè file đã có", variable=self.var_overwrite).pack(side="left", padx=(0, 16))
+        ttk.Checkbutton(opts, text="Ghi đè toàn bộ", variable=self.var_overwrite_folder).pack(side="left", padx=(0, 16))
         ttk.Checkbutton(opts, text="Mở thư mục đích khi xong", variable=self.var_open).pack(side="left")
 
         # 2. Chỉ mục
@@ -184,6 +186,7 @@ class MainWindow(ttk.Frame):
         self.cfg.dest_root = self.var_dst.get().strip()
         self.cfg.auto_rescan = self.var_rescan.get()
         self.cfg.overwrite = self.var_overwrite.get()
+        self.cfg.overwrite_folder = self.var_overwrite_folder.get()
         self.cfg.open_dest_when_done = self.var_open.get()
         self.cfg.ignored_pdf_tokens = list(dict.fromkeys(self.cfg.ignored_pdf_tokens))
         try:

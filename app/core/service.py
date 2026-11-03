@@ -74,8 +74,14 @@ def resolve(job: Job, index: FolderIndex, cfg: AppConfig, note: Optional[Note] =
 
 
 # ------------------------------------------------------------------ copy
-def copy_job(res: Resolution, dest_root: str, overwrite: bool) -> JobResult:
+def copy_job(res: Resolution, dest_root: str, overwrite: bool,
+             overwrite_folder: bool = False) -> JobResult:
     dest = os.path.join(dest_root, dest_folder_name(res.job.invoice, res.tokhai_no))
+    if overwrite_folder and os.path.exists(dest):
+        if os.path.isdir(dest):
+            shutil.rmtree(dest)
+        else:
+            os.remove(dest)
     os.makedirs(dest, exist_ok=True)
     copied, skipped = [], []
     pdfs = res.pdfs or ([res.pdf] if res.pdf else [])
@@ -151,7 +157,7 @@ def process(jobs: list[Job], cfg: AppConfig, index: FolderIndex, emit: Emit,
                 finish(JobResult(job, STATUS_NO_FILES, res.message, res.folder or ""))
             else:
                 try:
-                    r = copy_job(res, cfg.dest_root, cfg.overwrite)
+                    r = copy_job(res, cfg.dest_root, cfg.overwrite, cfg.overwrite_folder)
                     level = {STATUS_OK: "ok", STATUS_MULTI: "warn"}.get(r.status, "info")
                     log(level, f"[{job.invoice}] {r.status}: {r.message}")
                     finish(r)

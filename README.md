@@ -58,6 +58,7 @@ Bấm **Chọn…** để duyệt thư mục. Hai đường dẫn được lưu 
 Các tuỳ chọn bên dưới:
 - **Tự quét lại khi không thấy Invoice trong chỉ mục** *(nên bật)*: nếu Invoice chưa có trong JSON, tool tự quét lại thư mục to rồi thử lại.
 - **Ghi đè file đã tồn tại**: bật nếu muốn copy đè lên file cũ ở ổ riêng. Tắt thì file đã có (cùng dung lượng) sẽ được bỏ qua.
+- **Ghi đè toàn bộ**: bật nếu muốn xoá thư mục đích cũ của Invoice trước khi ghi. Thư mục mới chỉ chứa các file lấy được ở lần chạy hiện tại.
 - **Mở thư mục đích khi xong**: tự mở thư mục ổ riêng sau khi chạy xong.
 
 ### Bước 2 – Đọc thư mục to (lập chỉ mục)

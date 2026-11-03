@@ -20,6 +20,7 @@ class AppConfig:
     dest_root: str = ""                                      # thư mục đích trên ổ riêng
     auto_rescan: bool = True       # không thấy Invoice trong JSON -> tự quét lại
     overwrite: bool = False
+    overwrite_folder: bool = False  # thay toàn bộ thư mục invoice đích bằng bộ file mới
     open_dest_when_done: bool = True
     tokhai_prefix: str = DEFAULT_TOKHAI_PREFIX
     last_excel_dir: str = ""
